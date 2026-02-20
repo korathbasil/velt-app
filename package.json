@@ -1,0 +1,9 @@
+{
+  "name": "velt-app",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "swift run VeltApp",
+    "build": "swift build -c release",
+    "start": ".build/release/VeltApp"
+  }
+}

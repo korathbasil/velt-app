@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:UniverseUI}",
+            "name": "Debug VeltApp",
+            "target": "VeltApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug VeltApp",
+            "program": "${workspaceFolder:UniverseUI}/.build/debug/VeltApp"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:UniverseUI}",
+            "name": "Release VeltApp",
+            "target": "VeltApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release VeltApp",
+            "program": "${workspaceFolder:UniverseUI}/.build/release/VeltApp"
+        }
+    ]
+}

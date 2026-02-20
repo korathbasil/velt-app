@@ -1,0 +1,246 @@
+# Impeller Documentation / LLM Context
+
+## 1. Introduction
+Impeller is a rendering runtime for Flutter with the following objectives:
+*   **Predictable Performance**: All shader compilation and reflection is performed offline at build time. All pipeline state objects are built upfront. Caching is explicit and under the control of the engine.
+*   **Instrumentable**: All graphics resources (textures, buffers, pipeline state objects, etc..) are tagged and labeled. Animations can be captured and persisted to disk without affecting per-frame rendering performance.
+*   **Portable**: Not tied to a specific client rendering API. Shaders are authored once and converted as necessary.
+*   **Uses Modern Graphics APIs Effectively**: Makes heavy use of (but doesn’t depend on) features available in Modern APIs like Metal and Vulkan.
+*   **Makes Effective Use of Concurrency**: Can distribute single-frame workloads across multiple threads if necessary.
+
+## 2. Frequently Asked Questions
+
+### How do I enable Impeller to try it out myself?
+Impeller is enabled by default on iOS. To enable Impeller on other platforms, add the following to your `gradle.properties` file:
+`flutter.impeller.renderer.enable=true`
+
+### I am running into issues when Impeller is enabled, how do I report them?
+Like any other Flutter issue, you can report them on the [GitHub issue tracker](https://github.com/flutter/flutter/issues/new/choose).
+Please explicitly mention that this is an Impeller specific regression.
+
+### What does it mean for an Impeller platform to be "in preview". How long will be the preview last?
+The team is focused on getting one platform right at a time. When the team believes that the majority of Flutter applications will benefit from Impeller on a specific platform, the backend will be declared to be in preview. Once major issues reported by platforms in preview become manageable, the preview ends and Impeller becomes the default rendering backend.
+
+### Does Impeller use Skia for rendering?
+No. Impeller has no direct dependencies on Skia. When running with Impeller, Flutter does not create a Skia graphics context. However, SkParagraph (part of Skia) is still used for text layout, and Skia-wrapped codecs are used for image decompression.
+
+### Can Skia-wrapped image codecs be removed in favor of using system supplied image codecs?
+Using system decoders had more complications than initially expected. It would take a significant amount of work to achieve parity with the Skia codecs in terms of performance and reliability.
+
+### Is Impeller going to be supported on the Web?
+Updating the web engine to interface directly with Impeller is a non-goal at this time. Web support has not been a priority at this time for the small team working on Impeller.
+
+### How will Impeller affect the way in which Flutter applications are created and packaged?
+It won't. Impeller, like Skia, is an implementation detail of the Flutter Engine. The binary size overhead of Impeller is around 100 KB per architecture.
+
+### Why did the Flutter team build Impeller?
+For consistent performance, which could not be achieved with Skia after years of effort. Flutter applications were susceptible to shader compilation jank. Impeller solves this by compiling shaders offline.
+
+### What makes Impeller different, compared to Skia, for Flutter?
+Impeller precompiles all shaders offline. Skia generates and compiles shaders at runtime. Impeller uses a different tessellation approach (stencil-then-cover).
+
+### How does Graphite (a new GPU backend for Skia) relate to Impeller?
+Graphite is Skia's new backend. Flutter has no plans to use Graphite as of May 2025, but the teams communicate.
+
+### How does WebGPU/Dawn fit into the rendering landscape in Flutter?
+As of May 2025, Impeller has no plans to add a WebGPU/Dawn backend. WebGPU libraries are currently too large (binary size) for Flutter's constraints.
+
+## 3. Glossary
+
+### Device & Host
+In the context of graphics and Impeller, the device is the GPU and the host, the CPU.
+
+### Client Rendering API
+The API Impeller uses to talk to devices. Examples: OpenGL, Metal, Vulkan, Direct X.
+
+### Window System Integration (WSI)
+API that presents a render target in the platform's window system (e.g., EAGL, EGL).
+
+### Varying
+In shaders, a value interpolated between two vertices and provided to the fragment shader.
+
+### OpenGL / OpenGL ES
+Client rendering APIs used by Impeller on older Android versions.
+
+### Vulkan
+Modern client rendering API used by Impeller on Android. Also available on non-Apple platforms.
+
+### Metal
+Modern client rendering API used by Impeller on macOS and iOS.
+
+### EGL
+Provides WSI for OpenGL ES.
+
+### Android Hardware Buffers (AHB)
+Resources on Android (API >= 29) treated as textures by both OpenGL and Vulkan and shared with the system compositor.
+
+## 4. Impeller's Coordinate System
+**TL;DR: Impeller uses the Metal coordinate system.**
+
+| API           | Normalized Device Coordinate                          | Viewport / Framebuffer Coordinate     | Texture Coordinate                   |
+|---------------|-------------------------------------------------------|---------------------------------------|--------------------------------------|
+| **Impeller**  | `(-1,-1)` Bottom-Left, `(+1,+1)` Top-Right, `+Y` up.  | `(0,0)` Top-Left Origin, `+Y` down.   | `(0,0)` Top-Left Origin, `+Y` down.  |
+| **Metal**     | `(-1,-1)` Bottom-Left, `(+1,+1)` Top-Right, `+Y` up.  | `(0,0)` Top-Left Origin, `+Y` down.   | `(0,0)` Top-Left Origin, `+Y` down.  |
+| **OpenGL**    | `(-1,-1)` Bottom-Left, `(+1,+1)` Top-Right, `+Y` up.  | `(0,0)` Bottom-Left Origin, `+Y` up.  | `(0,0)` Bottom-Left Origin, `+Y` up. |
+| **Vulkan**    | `(-1,-1)` Top-Left, `(+1,+1)` Bottom-Right, `+Y` down.| `(0,0)` Top-Left Origin, `+Y` down.   | `(0,0)` Top-Left Origin, `+Y` down.  |
+
+## 5. Baby's First Triangle
+
+### The Pipeline
+A pipeline describes the fixed function and programmable stages of a rasterization job. Pipelines are expensive to create, so create them upfront.
+
+#### Shaders
+Vertex Shader (`baby.vert`): Transforms vertices to NDC.
+```glsl
+in vec2 position;
+void main() { gl_Position = vec4(position, 0.0, 1.0); }
+```
+
+Fragment Shader (`baby.frag`): Colors pixels.
+```glsl
+out vec4 frag_color;
+void main() { frag_color = vec4(1.0, 0.0, 0.0, 1.0); }
+```
+
+#### Pipeline Descriptor
+The compiler generates C++ headers (`baby.vert.h`, `baby.frag.h`) with interfaces and metadata.
+Use `PipelineBuilder<VS, FS>::MakeDefaultPipelineDescriptor(*context)` to create a descriptor.
+Use `context->GetPipelineLibrary()->GetPipeline(desc).Get()` to create the pipeline.
+
+### Vertex Data
+Use `VertexBufferBuilder<T>` (where T is the generated `PerVertexData` struct) to create vertex buffers.
+```c++
+VertexBufferBuilder<VS::PerVertexData> vertex_buffer_builder;
+vertex_buffer_builder.AddVertices({ {{-0.5, -0.5}}, {{0.0, 0.5}}, {{0.5, -0.5}} });
+auto vertex_buffer = vertex_buffer_builder.CreateVertexBuffer(*context->GetResourceAllocator());
+```
+
+### Draw
+```c++
+pass.SetPipeline(pipeline);
+pass.SetVertexBuffer(vertex_buffer);
+pass.Draw();
+```
+
+### Uniforms
+Use `HostBuffer` to upload uniform data (constant across invocations).
+```c++
+FS::FragInfo frag_info; // Generated struct
+frag_info.time = ...;
+auto host_buffer = HostBuffer::Create(context->GetResourceAllocator());
+FS::BindFragInfo(pass, host_buffer->EmplaceUniform(frag_info));
+```
+
+## 6. Using Impeller as a Standalone Rendering Library (OpenGLES)
+Note: This is low-level usage using the HAL directly.
+
+### Setup
+1.  **EGL Display & Context**: Use `egl::Display` and `egl::ConfigDescriptor` to get an OpenGLES 2.0 config. Create context and surface. Make current.
+2.  **OpenGL ES Context in Impeller**:
+    *   Create a resolver for `eglGetProcAddress`.
+    *   Create `ProcTableGLES`.
+    *   Provide shader library mappings (mappings to precompiled shader blobs).
+    *   Create `ContextGLES::Create(std::move(gl), std::move(mappings), false)`.
+3.  **Threading (GLES only)**: Create a `ReactorWorker` subclass and add it to the context (`context->AddReactorWorker(worker)`) because GLES is not thread-safe.
+4.  **Renderer**: `auto renderer = std::make_shared<Renderer>(context);`
+
+### Rendering Frames
+1.  **Wrap Onscreen Surface**: `SurfaceGLES::WrapFBO(...)`.
+2.  **Swap Callback**: Define a callback that flushes the reactor and presents the surface.
+3.  **Render**:
+    ```c++
+    renderer_->Render(std::move(surface), [&](RenderTarget& render_target) -> bool {
+        // Render commands here
+        return true;
+    });
+    ```
+
+## 7. Performance & Optimization
+
+### Writing Efficient Shaders
+*   **GPU Architecture**: Mobile GPUs often use SIMD or SIMT. Branching can be expensive if not uniform.
+*   **Uniform/Constant Branches**: Don't flatten. Drivers handle them well.
+*   **Simple Varying Branches**: Don't flatten on modern SIMT. It's often faster to branch.
+*   **Complex Varying Branches**: Avoid if possible. On VLIW/SIMD, the compiler can't parallelize efficiently. On SIMT, it's efficient only if the branch condition is consistent across the warp.
+*   **Return Branching**: Treat like complex varying branches.
+*   **Precision**: Use lower precision (mediump/lowp) where possible on mobile GPUs.
+
+### Color Blending
+Impeller supports Skia-compatible blend modes.
+*   **Pipeline Blends**: Implemented using raster pipeline blend configuration (cheap). Includes Porter-Duff alpha composites (SourceOver, Clear, etc.).
+*   **Advanced Blends**: Implemented via shaders binding the backdrop texture (expensive). Includes Screen, Overlay, Darken, etc. Requires ending the render pass, sampling backdrop, and using intermediate texture.
+
+### Benchmarks
+Impeller performance is tracked via dashboards:
+*   **New Gallery**: General Flutter gallery performance.
+*   **Animated Blur/Advanced Blend**: Specific stress tests covering gaps (blur, advanced blends) seen in apps like Wonderous.
+*   Comparison dashboards exist for Skia vs Impeller and Vulkan vs OpenGLES.
+
+### Threading in Vulkan
+*   **Concurrent Worker Pool**: Created with Vulkan context. Used for frame workloads.
+*   **Fence Waiter**: Separate thread. Ensures resource reference counts live as long as GPU command buffers.
+*   **Resource Manager**: Separate thread for resource collection/pooling to avoid jank on frame threads.
+*   **Structure**: Render Thread -> Workers -> GPU -> Fence Waiter -> Resource Manager.
+
+### UBOs in OpenGL ES 2.0
+GLES 2.0 lacks Uniform Buffer Objects. Impeller works around this by:
+1.  Allocating a client-side "jumbo buffer" for uniforms.
+2.  Reflection engine generates metadata about uniform members (offset, size).
+3.  Runtime queries `GL_ACTIVE_UNIFORMS` at usage time, maps them to reflection data, and issues `glUniform*` calls using the data from the jumbo buffer.
+
+## 8. Debugging & Profiling: Frame Captures
+
+### Learning to Read GPU Frame Captures
+Start with a simple frame (e.g., an empty parking lot/playground).
+*   **Overview**: Look at draw calls, command buffers, and encoders.
+*   **Memory**: Check graphics memory usage, texture formats, and "Time Since Last Used" (for leaks).
+*   **Pipeline State**: Inspect the `SolidFillPipeline` or similar. Check blend modes, pixel formats.
+*   **Draw Calls**: Inspect "Bound Resources". Check Geometry (vertices transformed to NDC) and Uniforms (packed in jumbo buffers).
+*   **Attachments**: Debug writes to buffers (color, stencil). Use histogram/range views.
+
+### Xcode Frame Capture (iOS/macOS)
+1.  **Setup**: Create an external build system project in Xcode calling GN/Ninja.
+2.  **Scheme**: Edit Scheme -> Options -> GPU Frame Capture -> Metal. Diagnostics -> API Validation.
+3.  **Run**: Launch the test executable (e.g., `impeller_unittests`) with `--enable_playground`.
+4.  **Capture**: Click the 'M' button in the debug bar to capture a frame.
+
+### RenderDoc Frame Capture (Linux/Android)
+1.  **Setup**: Install RenderDoc.
+2.  **Run**: Launch application pointing to the executable (e.g., `impeller_unittests`). Args: `--gtest_filter="..." --enable_playground`.
+3.  **Capture**: Press F12 to capture.
+4.  **Android**: Use standard Android setup. Note that `flutter run` flags aren't retained; configure `AndroidManifest.xml` for Impeller.
+
+### Debugging Shaders
+*   **Xcode**: Can debug Metal shaders converted from GLSL.
+    *   **Fragment**: Select a draw call -> Open Attachment -> Click "Debug" on a pixel.
+    *   **Vertex**: Open Geometry -> Select Vertex -> Click "Debug".
+    *   **Live Editing**: Edit shader source and click "Reload Shader" to see changes instantly.
+    *   **"No Source" Error**: Add `.metallibsym` files from `out/<variant>/shaders` to Xcode's External Source Search Paths.
+
+## 9. Validation & Platform Specifics
+
+### Metal Validation & Profiling (iOS/macOS)
+*   **Environment Variables**: `MTL_DEBUG_LAYER=1`, `MTL_SHADER_VALIDATION=1`.
+*   **HUD**: `MTL_HUD_ENABLED=1` displays real-time performance HUD.
+*   **CPU Profiling**: Use Xcode Instruments (Time Profiler). Convert to FlameGraph using `lennet/FlameGraph` tool.
+
+### Android Validation & Profiling
+*   **Vulkan Validation Layers**: Build with `--enable-vulkan-validation-layers`. Enable in manifest via meta-data `EnableVulkanValidation`.
+*   **CPU Profiling**:
+    1.  Build engine with `--no-stripped` and `--no-lto`.
+    2.  Add `doNotStrip "**/*.so"` to gradle.
+    3.  Run with local engine.
+    4.  Use Android Studio Profiler -> CPU -> Callstack Sample Recording -> Select Raster thread -> Flame Graph.
+*   **Backend Selection**:
+    *   **Vulkan**: Preferred if device supports Vulkan 1.1+, Android 10+ (API 29+), and necessary extensions.
+    *   **OpenGL ES**: Fallback for older devices/versions. SurfaceTextures generally work fine on GLES but not currently on Vulkan.
+
+### OpenGL ES Development Setup
+*   **Playgrounds**: Use `--enable_playground --timeout=0`. Use `--use_angle` on macOS.
+*   **Filtering**: Select specific backends tests via `--gtest_filter="Play/*Foo*/OpenGLES"`.
+*   **Frame Capture**:
+    *   **macOS**: Use Xcode Frame Capture (captures Metal calls made by Angle). 1-1 relationship for most resources, but buffers may be messy ("Buffer Soup").
+    *   **Non-macOS**: Use RenderDoc.
+
+## 10. Glossary
+(See Section 3 for core glossary)
